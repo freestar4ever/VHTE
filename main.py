@@ -8,7 +8,7 @@ import numpy as np
 import openface
 
 
-def get_image_representation(image_relative_path, dimension, network_model, align_dlib):
+def get_aligned_face(image_relative_path, dimension, network_model, align_dlib):
     image = cv2.imread(image_relative_path)
     if image is None:
         raise ValueError("Unable to load image at {}".format(image_relative_path))
@@ -33,30 +33,72 @@ def get_image_representation(image_relative_path, dimension, network_model, alig
 
 def generate_profiles(cmd_arguments, folder, network_model, align_dlib):
     number_of_images = len(cmd_arguments.imgs)
-    if number_of_images != 3:
+    if number_of_images < 3:
         raise ValueError("At least 3 images needed to generate a valid profile")
 
-    print('Generating profile given {} images'.format(number_of_images))
+    profile_name = cmd_arguments.name
 
-    profile_id = 0
+    print('Generating profile for {}, given {} images'.format(profile_name, number_of_images))
+    os.path.exists(os.path.join(folder, profile_name))
 
-    while os.path.exists(os.path.join(folder, 'P_{}'.format(profile_id))):
-        profile_id += 1
-
-    profile_folder = os.path.join(folder, 'P_{}'.format(profile_id))
+    profile_folder = os.path.join(folder, profile_name)
     os.mkdir(profile_folder)
 
     for i, img in enumerate(cmd_arguments.imgs):
         try:
-            rep = get_image_representation(img, cmd_arguments.imgDim, network_model, align_dlib)
-            np.savetxt(os.path.join(os.path.join(profile_folder), '{:03d}'.format(i)), rep)
-            print('Generated profile no. {:03d} for {}'.format(i, folder))
+            face = get_aligned_face(img, cmd_arguments.imgDim, network_model, align_dlib)
+            np.savetxt(os.path.join(os.path.join(profile_folder), '{:03d}'.format(i)), face)
+            print('Generated profile no. {:03d} for {}'.format(i, profile_name))
         except ValueError as e:
-            print('Skipping profile no. {:03d} for {}! {}'.format(i, folder, e.message))
+            print('Skipping profile no. {:03d} for {}! {}'.format(i, profile_name, e.message))
+
+
+def identify_profile(args, folder, net, align):
+    if len(args.imgs) != 1:
+        raise ValueError("At least 1 photo needed for comparison!")
+    try:
+        face_to_found = get_aligned_face(args.imgs[0], args.imgDim, net, align)
+    except ValueError:
+        print('Unknown input face, cannot get image representation! Exiting')
+        return None
+
+    profiles = {}
+    id_class = 0
+
+    # print('Finding who is {}'.format(args.imgDim))
+    for folder_profile_photos in os.listdir(folder):
+        current_folder = os.path.join(folder, folder_profile_photos)
+        distances_from_known_profiles = []
+
+        # print('....Finding best match into {}'.format(folder_profile_photos))
+        for profile_file in sorted(os.listdir(current_folder)):
+            if profile_file == 'info':
+                continue
+
+            current_face = np.loadtxt(os.path.join(current_folder, profile_file))
+            difference_matrix = face_to_found - current_face
+
+            distances_from_known_profiles.append(np.dot(difference_matrix, difference_matrix))
+        id_class += 1
+
+        avg_distance = sum(distances_from_known_profiles) / float(len(os.listdir(folder)))
+        profiles[id_class] = (current_folder, avg_distance)
+
+    # print('..Result of scanning:')
+    # for p, distance in profiles.items():
+    #     print('....{} --> {}'.format(p, distance))
+
+    # order by second value of tuple
+    best_match = sorted(profiles.items(), key=lambda kv: kv[1][1])[0]
+
+    # if best_match[1][1] > 0.5:
+    #     print('Face not found! Best match is {} with distance {}'.format(best_match[1][0], best_match[1][1]))
+    #     return None
+
+    return best_match[1]
 
 
 def parse_command_line(root_folder):
-
     models_folder = os.path.join(root_folder, 'models')
     dlib_model_folder = os.path.join(models_folder, 'dlib')
     openface_folder = os.path.join(models_folder, 'openface')
@@ -75,8 +117,12 @@ def parse_command_line(root_folder):
     parser.add_argument('--imgDim',
                         type=int, help="Default image dimension", default=96)
 
+    parser.add_argument('--name',
+                        type=str, help="Name of profile")
+
     parser.add_argument('--profile',
                         action='store_true')
+
     return parser.parse_args()
 
 
@@ -87,55 +133,16 @@ if __name__ == '__main__':
     if not os.path.exists(profiles_folder):
         os.mkdir(profiles_folder)
 
-    args = parse_command_line(current_directory)
+    cmd_args = parse_command_line(current_directory)
 
-    align = openface.AlignDlib(args.dlibFacePredictor)
-    net = openface.TorchNeuralNet(args.networkModel, args.imgDim)
+    aligner = openface.AlignDlib(cmd_args.dlibFacePredictor)
+    neural_net = openface.TorchNeuralNet(cmd_args.networkModel, cmd_args.imgDim)
 
-    if args.profile:
-        generate_profiles(args, profiles_folder, net, align)
+    if cmd_args.profile:
+        generate_profiles(cmd_args, profiles_folder, neural_net, aligner)
     else:
-        if len(args.imgs) != 1:
-            raise ValueError("At least 1 photo needed for comparison!")
-
-        distances_from_known_profiles = np.zeros(len(os.listdir(profiles_folder)) * 3, dtype=np.float)
-        class_profiles = np.empty(len(os.listdir(profiles_folder)) * 3, dtype=np.int8)
-
-        profiles = {}
-        counter = 0
-        id_class = 0
-
-        representation = get_image_representation(args.imgs[0], args.imgDim, net, align)
-
-        for profile_photo in os.listdir(profiles_folder):
-            current_folder = os.path.join(profiles_folder, profile_photo)
-            profiles[id_class] = current_folder
-            for profile_file in os.listdir(current_folder):
-                if profile_file == 'info':
-                    continue
-
-                rapBack = np.loadtxt(os.path.join(current_folder, profile_file))
-
-                d = representation - rapBack
-                distances_from_known_profiles[counter] = np.dot(d, d)
-                class_profiles[counter] = id_class
-                counter += 1
-            id_class += 1
-
-            best_profiles = np.argsort(distances_from_known_profiles)[:3]
-            prof_min = class_profiles[best_profiles]
-
-            if prof_min[0] > 0.5:
-                print('Unknown profile!')
-                sys.exit(1)
-
-            if prof_min[0] == prof_min[1] or prof_min[0] == prof_min[2]:
-                print('Found profile {}'.format(profiles[prof_min[0]]))
-                sys.exit(0)
-
-            if prof_min[1] == prof_min[2]:
-                print('Found profile {}'.format(profiles[prof_min[1]]))
-                sys.exit(0)
-
-            print('Unknown face')
-            sys.exit(2)
+        who = identify_profile(cmd_args, profiles_folder, neural_net, aligner)
+        if who is not None:
+            print('Found! is: {} (with avg distance of {})'.format(who[0], who[1]))
+        else:
+            print('Cannot detect who is {}'.format(cmd_args.imgs))
