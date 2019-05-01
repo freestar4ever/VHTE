@@ -1,6 +1,5 @@
 #!/usr/bin/env python2
 
-import sys
 import argparse
 import cv2
 import os
@@ -115,7 +114,7 @@ def parse_command_line(root_folder):
                         default=os.path.join(openface_folder, 'nn4.small2.v1.t7'))
 
     parser.add_argument('--imgDim',
-                        type=int, help="Default image dimension", default=96)
+                        type=int, help="Defclault image dimension", default=96)
 
     parser.add_argument('--name',
                         type=str, help="Name of profile")
